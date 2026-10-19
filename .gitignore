@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+runs/
+.DS_Store
+
+
+# Local agent state, archives, and reference photos
+.omc/
+*.zip
+/folder_face_finder/*.jpg
+.env
+.env.*
