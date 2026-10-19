@@ -304,6 +304,16 @@ class MainWindow(QMainWindow):
         actions.addStretch()
         actions.addWidget(self.open_folder)
         work.addLayout(actions)
+        display_options = QHBoxLayout()
+        self.show_previews = QCheckBox("Show previews")
+        self.show_previews.toggled.connect(self.update_previews)
+        display_options.addWidget(self.show_previews)
+        self.hide_url = QCheckBox("Hide URL")
+        self.hide_url.setToolTip("Mask the Page URL input with password dots.")
+        self.hide_url.toggled.connect(self.update_url_visibility)
+        display_options.addWidget(self.hide_url)
+        display_options.addStretch()
+        work.addLayout(display_options)
         self.counts = QLabel("Found 0  ·  Downloaded 0  ·  Processed 0  ·  Matches 0  ·  Errors 0")
         self.counts.setStyleSheet("padding: 8px 0; color: #b7c5d8;")
         work.addWidget(self.counts)
@@ -367,6 +377,23 @@ class MainWindow(QMainWindow):
         self.page_param.textChanged.connect(self.update_page_type)
         self.update_reference_mode()
         self.update_page_type()
+        self.update_previews()
+
+    def update_url_visibility(self, hidden: bool):
+        self.url.setEchoMode(
+            QLineEdit.EchoMode.Password if hidden else QLineEdit.EchoMode.Normal
+        )
+
+    def update_previews(self):
+        visible = self.show_previews.isChecked()
+        for preview in (self.scan_preview, self.process_preview):
+            preview.setVisible(visible)
+            if not visible:
+                preview.pixmap = QPixmap()
+                preview.image.clear()
+                preview.image.setText("Waiting for images")
+        for row, data in enumerate(self.results):
+            self.table.item(row, 0).setIcon(QIcon(data["local_path"]) if visible else QIcon())
 
     def update_page_type(self, *_):
         mode = self.page_type.currentData()
@@ -421,6 +448,8 @@ class MainWindow(QMainWindow):
             self.output.setText(directory)
 
     def restore_settings(self):
+        self.show_previews.setChecked(self.settings.value("show_previews", False, type=bool))
+        self.hide_url.setChecked(self.settings.value("hide_url", False, type=bool))
         for key, field in [
             ("url", self.url),
             ("output", self.output),
@@ -450,6 +479,8 @@ class MainWindow(QMainWindow):
         self.update_page_type()
 
     def save_settings(self):
+        self.settings.setValue("show_previews", self.show_previews.isChecked())
+        self.settings.setValue("hide_url", self.hide_url.isChecked())
         for key, field in [
             ("url", self.url),
             ("output", self.output),
@@ -569,9 +600,11 @@ class MainWindow(QMainWindow):
         elif name == "process_status":
             self.process_preview.status.setText(str(data))
         elif name == "scan_image":
-            self.scan_preview.show_image(data)
+            if self.show_previews.isChecked():
+                self.scan_preview.show_image(data)
         elif name == "process_image":
-            self.process_preview.show_image(data)
+            if self.show_previews.isChecked():
+                self.process_preview.show_image(data)
         elif name == "stats":
             self.counts.setText(
                 "  ·  ".join(
@@ -639,7 +672,7 @@ class MainWindow(QMainWindow):
         ]
         for column, value in enumerate(values):
             item = QTableWidgetItem(value)
-            if column == 0:
+            if column == 0 and self.show_previews.isChecked():
                 item.setIcon(QIcon(data["local_path"]))
             item.setToolTip(data.get("error") or value)
             if data["status"] == "candidate_match":

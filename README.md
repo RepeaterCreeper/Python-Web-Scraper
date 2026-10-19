@@ -54,8 +54,10 @@ uv run --extra browser sscraper
    Enable **Render JavaScript** if images are inserted by scripts or pagination
    uses a JavaScript button. Infinite scroll enables browser rendering automatically.
 4. Choose an output folder and click **Start scan**.
-5. Watch the scanning preview for downloaded images and the processing preview
-   for face comparison. A box marks the closest detected face after comparison.
+5. Previews are hidden by default. Enable **Show previews** to display live download
+   and face-comparison previews and result thumbnails. A box marks the closest
+   detected face after comparison. Toggle **Hide URL** to mask the Page URL input
+   like a password field. Both choices are remembered and can be changed during a scan.
 6. Filter to **Candidates only**, select a result to open its source page, or
    double-click a row to open the downloaded image. Open the scan folder for the report.
 
