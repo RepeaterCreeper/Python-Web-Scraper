@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,12 @@ class FaceMatcher:
         deepface=None,
     ):
         if deepface is None:
+            if sys.version_info >= (3, 14):
+                raise RuntimeError(
+                    "Face matching requires Python 3.11-3.13 because TensorFlow does not "
+                    "yet support this Python version. Leave reference photos empty to "
+                    "download images, or run the app with Python 3.13 for face matching."
+                )
             from deepface import DeepFace
 
             deepface = DeepFace

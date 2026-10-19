@@ -10,6 +10,19 @@ optionally compares detected faces with one or more reference photos using
 
 ## Run
 
+Python 3.11-3.15 is supported for scraping and CSV viewing. Face matching requires
+Python 3.11-3.13; TensorFlow does not yet provide Python 3.14/3.15 builds.
+On those newer versions, leave reference photos empty to download images only.
+
+On Windows with Python 3.15:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,browser]"
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe -m sscraper
+```
+
 The project environment is already installed in `.venv` in this workspace:
 
 ```sh

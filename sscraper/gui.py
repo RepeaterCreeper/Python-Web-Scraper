@@ -516,6 +516,11 @@ class MainWindow(QMainWindow):
                 Path(self.references.item(i).data(Qt.ItemDataRole.UserRole))
                 for i in range(self.references.count())
             ]
+            if references and sys.version_info >= (3, 14):
+                raise ValueError(
+                    "Face matching requires Python 3.11-3.13. Remove reference photos "
+                    "to download images on this Python version, or use Python 3.13."
+                )
             if any(not path.is_file() for path in references):
                 raise ValueError(
                     "A reference photo no longer exists. Remove it and choose another."
