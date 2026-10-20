@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
+import multiprocessing
 import os
 import shutil
 import threading
 import traceback
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,8 +50,11 @@ class Config:
     detector: str = "opencv"
     threshold: float | None = None
     copy_matches: bool = True
+    workers: int = 1
 
     def validate(self):
+        if type(self.workers) is not int or not 1 <= self.workers <= 32:
+            raise ValueError("Parallel workers must be an integer between 1 and 32.")
         if not self.source.is_dir():
             raise ValueError("Choose an existing folder of images.")
         if any(not path.is_file() for path in self.references):
@@ -149,6 +155,12 @@ class Matcher:
         return faces
 
     def prepare(self, emit):
+        if self.config.workers > 1 and hasattr(self.api, "build_model"):
+            # Finish any first-use weight downloads before starting child processes.
+            emit("status", "Preparing models for parallel workers…")
+            self.api.build_model(self.config.detector, task="face_detector")
+            if self.config.references:
+                self.api.build_model(self.config.model)
         for path in self.config.references:
             emit("status", f"Preparing reference: {path.name}")
             emit("preview", {"path": str(path), "areas": []})
@@ -191,6 +203,71 @@ class Matcher:
             support.get(index, 0),
             index,
         )
+
+
+_worker_matcher = None
+
+
+def _initialize_worker(config, stop, matcher_factory, references):
+    global _worker_matcher
+    _worker_matcher = matcher_factory(config, stop)
+    _worker_matcher.references = references
+
+
+def _analyze_worker(path):
+    return _worker_matcher.analyze(path)
+
+
+def analyze_images(config, images, matcher, matcher_factory, stop):
+    """Yield completed futures; only the coordinator emits events or writes reports."""
+    if not images:
+        return
+    if config.workers == 1:
+        for path in images:
+            if stop.is_set():
+                raise Cancelled()
+            future = Future()
+            try:
+                future.set_result(matcher.analyze(path))
+            except Exception as exc:
+                future.set_exception(exc)
+            yield path, future
+        return
+
+    # Spawn avoids inheriting Qt/native model threads from the desktop process.
+    context = multiprocessing.get_context("spawn")
+    worker_stop = context.Event()
+    pool = ProcessPoolExecutor(
+        max_workers=min(config.workers, len(images)),
+        mp_context=context,
+        initializer=_initialize_worker,
+        initargs=(config, worker_stop, matcher_factory, getattr(matcher, "references", [])),
+    )
+    pending = {}
+    paths = iter(images)
+
+    def submit_next():
+        if not stop.is_set():
+            path = next(paths, None)
+            if path is not None:
+                pending[pool.submit(_analyze_worker, path)] = path
+
+    try:
+        for _ in range(min(config.workers, len(images))):
+            submit_next()
+        while pending:
+            if stop.is_set():
+                raise Cancelled()
+            done, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in done:
+                if stop.is_set():
+                    raise Cancelled()
+                path = pending.pop(future)
+                yield path, future
+                submit_next()
+    finally:
+        worker_stop.set()
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 class FolderScan:
@@ -247,68 +324,75 @@ class FolderScan:
                     self.event("status", "Loading DeepFace. First use may download model weights…")
                     matcher = self.matcher_factory(self.config, self.stop)
                     matcher.prepare(self.event)
+                    self.event(
+                        "status",
+                        f"Recognizing images with {min(self.config.workers, len(images))} worker(s)…",
+                    )
                 else:
                     self.event(
                         "log",
                         "No supported candidate images found. Reference photos, symbolic links and scan-output folders are excluded.",
                     )
-                for path in images:
-                    if self.stop.is_set():
-                        raise Cancelled()
-                    relative = path.relative_to(self.config.source.resolve())
-                    row = {"source_path": str(path), "relative_path": str(relative)}
-                    self.event(
-                        "status",
-                        f"Processing {self.stats['processed'] + 1}/{len(images)}: {relative}",
-                    )
-                    self.event("preview", {"path": str(path), "areas": []})
-                    try:
-                        result = matcher.analyze(path)
-                        row.update(
-                            status=result.status,
-                            face_count=len(result.areas),
-                            distance=result.distance,
-                            threshold=result.threshold,
-                            reference=result.reference,
-                            supporting_references=result.supporting_references,
-                        )
-                        self.stats["with_faces"] += 1
+                with closing(
+                    analyze_images(self.config, images, matcher, self.matcher_factory, self.stop)
+                ) as completed:
+                    for path, future in completed:
+                        if self.stop.is_set():
+                            raise Cancelled()
+                        relative = path.relative_to(self.config.source.resolve())
+                        row = {"source_path": str(path), "relative_path": str(relative)}
                         self.event(
-                            "preview",
-                            {
-                                "path": str(path),
-                                "areas": result.areas,
-                                "closest_face": result.closest_face,
-                                "matched": result.status == "candidate_match",
-                            },
+                            "status",
+                            f"Processing {self.stats['processed'] + 1}/{len(images)}: {relative}",
                         )
-                        if result.status == "candidate_match":
-                            self.stats["matches"] += 1
-                            if self.config.copy_matches:
-                                destination = self.run_dir / "matches" / relative
-                                try:
-                                    destination.parent.mkdir(parents=True, exist_ok=True)
-                                    shutil.copy2(path, destination)
-                                    row["copied_path"] = str(destination)
-                                except OSError as exc:
-                                    self.stats["errors"] += 1
-                                    row["error"] = f"Matched, but could not copy: {exc}"
-                                    self.event("log", row["error"])
-                    except NoFace:
-                        row.update(status="no_face", face_count=0)
-                        self.stats["no_face"] += 1
-                    except Cancelled:
-                        raise
-                    except Exception as exc:
-                        row.update(status="processing_error", error=str(exc))
-                        self.stats["errors"] += 1
-                        self.event("log", f"Could not process {relative}: {exc}")
-                        self.event("debug", traceback.format_exc())
-                    writer.writerow({key: row.get(key, "") for key in FIELDS})
-                    report.flush()
-                    self.stats["processed"] += 1
-                    self.event("stats", dict(self.stats))
-                    self.event("result", row)
+                        self.event("preview", {"path": str(path), "areas": []})
+                        try:
+                            result = future.result()
+                            row.update(
+                                status=result.status,
+                                face_count=len(result.areas),
+                                distance=result.distance,
+                                threshold=result.threshold,
+                                reference=result.reference,
+                                supporting_references=result.supporting_references,
+                            )
+                            self.stats["with_faces"] += 1
+                            self.event(
+                                "preview",
+                                {
+                                    "path": str(path),
+                                    "areas": result.areas,
+                                    "closest_face": result.closest_face,
+                                    "matched": result.status == "candidate_match",
+                                },
+                            )
+                            if result.status == "candidate_match":
+                                self.stats["matches"] += 1
+                                if self.config.copy_matches:
+                                    destination = self.run_dir / "matches" / relative
+                                    try:
+                                        destination.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(path, destination)
+                                        row["copied_path"] = str(destination)
+                                    except OSError as exc:
+                                        self.stats["errors"] += 1
+                                        row["error"] = f"Matched, but could not copy: {exc}"
+                                        self.event("log", row["error"])
+                        except NoFace:
+                            row.update(status="no_face", face_count=0)
+                            self.stats["no_face"] += 1
+                        except Cancelled:
+                            raise
+                        except Exception as exc:
+                            row.update(status="processing_error", error=str(exc))
+                            self.stats["errors"] += 1
+                            self.event("log", f"Could not process {relative}: {exc}")
+                            self.event("debug", traceback.format_exc())
+                        writer.writerow({key: row.get(key, "") for key in FIELDS})
+                        report.flush()
+                        self.stats["processed"] += 1
+                        self.event("stats", dict(self.stats))
+                        self.event("result", row)
             if self.stats["errors"]:
                 outcome = "complete_with_errors"
         except Cancelled:

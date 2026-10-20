@@ -32,11 +32,21 @@ Or use `uv sync` followed by `uv run folder-face-finder` from this folder.
    With no references, the app performs **face detection only**, counting and
    highlighting faces without identifying anyone.
 3. Choose the output folder. The default is this app's `runs/` folder.
-4. Click **Start scan**. The current image, face boxes, progress and results
-   update while DeepFace runs in a background thread.
+4. Set **Parallel workers** to 2 or more to recognize multiple images at once.
+   The default is 1. Each worker loads its own model, so start with 2 and increase
+   only if memory allows. Click **Start scan**. The current image, face boxes, progress and results
+   update while DeepFace runs in the background. Parallel results appear in
+   completion order.
 5. Filter results to candidates, images with faces, no-face images or errors.
    Double-click a row to open the original image. **Open results folder** opens
    the reports and any copied candidate matches.
+
+Use **Hide URLs / paths** to mask image names, paths, reference names and tooltips;
+this also hides the status bar and activity log and masks the folder fields.
+**Hide thumbnails** hides the current-image preview and reference/result thumbnails.
+Both controls apply immediately to existing and incoming results and are remembered,
+as is the worker count. These are display settings: saved reports retain full paths,
+and double-clicking a result still opens its original image.
 
 Original images are read and never moved, renamed, or edited. **Copy candidate
 matches into the results folder** is optional and preserves relative subfolders,
@@ -44,14 +54,14 @@ so matching files with the same name do not collide. Candidate matches require
 manual review; they are not confirmed identities or calibrated probabilities.
 
 **Stop** preserves completed results and stops before the next image or
-comparison. A currently running model import, model download, inference, or file
-copy must finish first. Closing the app during a scan requests the same graceful stop.
+comparison. Active model imports, model downloads, inference, or file
+operations must finish first; no new images are scheduled after Stop. Closing the app during a scan requests the same graceful stop.
 
 ## How matching works
 
 The default model is **SFace** within **DeepFace**, with the OpenCV detector.
 ArcFace, Facenet512 and VGG-Face are also selectable. References are embedded once
-per scan using `DeepFace.represent()`. Every detected candidate face is compared
+per scan and shared with worker processes using `DeepFace.represent()`. Every detected candidate face is compared
 against each reference with `DeepFace.verify()` and cosine distance. The closest
 comparison supplies the result; a candidate matches if any reference passes the
 model's threshold. The Refs column counts supporting references for that face.

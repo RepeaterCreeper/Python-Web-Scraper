@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -169,6 +170,13 @@ class MainWindow(QMainWindow):
         self.detector = QComboBox()
         self.detector.addItems(["opencv", "retinaface"])
         form.addRow("Face detector", self.detector)
+        self.workers = QSpinBox()
+        self.workers.setRange(1, 32)
+        self.workers.setValue(1)
+        self.workers.setToolTip(
+            "Each worker loads its own model. Start with 2; more uses more memory."
+        )
+        form.addRow("Parallel workers", self.workers)
         threshold_row = QHBoxLayout()
         self.custom_threshold = QCheckBox("Custom")
         self.threshold = QDoubleSpinBox()
@@ -235,6 +243,12 @@ class MainWindow(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Results · double-click to open an image"))
         filter_row.addStretch()
+        self.hide_urls = QCheckBox("Hide URLs / paths")
+        self.hide_thumbnails = QCheckBox("Hide thumbnails")
+        filter_row.addWidget(self.hide_urls)
+        filter_row.addWidget(self.hide_thumbnails)
+        self.hide_urls.toggled.connect(self.update_visibility)
+        self.hide_thumbnails.toggled.connect(self.update_visibility)
         self.filter = QComboBox()
         self.filter.addItem("All images", "all")
         self.filter.addItem("Candidates", "candidate_match")
@@ -307,6 +321,7 @@ class MainWindow(QMainWindow):
                 item.setToolTip(path)
                 self.references.addItem(item)
                 existing.add(path)
+        self.update_visibility()
 
     def restore_settings(self):
         for key, field in [("source", self.source), ("output", self.output)]:
@@ -315,6 +330,9 @@ class MainWindow(QMainWindow):
         self.copy_matches.setChecked(self.settings.value("copy_matches", True, type=bool))
         self.model.setCurrentText(str(self.settings.value("model", "SFace")))
         self.detector.setCurrentText(str(self.settings.value("detector", "opencv")))
+        self.workers.setValue(self.settings.value("workers", 1, type=int))
+        self.hide_urls.setChecked(self.settings.value("hide_urls", False, type=bool))
+        self.hide_thumbnails.setChecked(self.settings.value("hide_thumbnails", False, type=bool))
 
     def save_settings(self):
         for key, value in [
@@ -324,6 +342,9 @@ class MainWindow(QMainWindow):
             ("copy_matches", self.copy_matches.isChecked()),
             ("model", self.model.currentText()),
             ("detector", self.detector.currentText()),
+            ("workers", self.workers.value()),
+            ("hide_urls", self.hide_urls.isChecked()),
+            ("hide_thumbnails", self.hide_thumbnails.isChecked()),
         ]:
             self.settings.setValue(key, value)
 
@@ -345,6 +366,7 @@ class MainWindow(QMainWindow):
                 detector=self.detector.currentText(),
                 threshold=self.threshold.value() if self.custom_threshold.isChecked() else None,
                 copy_matches=self.copy_matches.isChecked(),
+                workers=self.workers.value(),
             )
             config.validate()
         except (ValueError, OSError) as exc:
@@ -374,9 +396,7 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop.set()
             self.stop_button.setEnabled(False)
-            self.statusBar().showMessage(
-                "Stopping after the current model or file operation finishes…"
-            )
+            self.statusBar().showMessage("Stopping after active model or file operations finish…")
 
     def handle_update(self, name, data):
         if name == "run_dir":
@@ -387,7 +407,8 @@ class MainWindow(QMainWindow):
             self.preview.caption.setText(str(data))
             self.statusBar().showMessage(str(data))
         elif name == "preview":
-            self.preview.show_image(data)
+            if not self.hide_thumbnails.isChecked():
+                self.preview.show_image(data)
         elif name == "discovery":
             self.statusBar().showMessage(f"Finding image files… {data} found")
         elif name == "stats":
@@ -436,13 +457,47 @@ class MainWindow(QMainWindow):
         for column, value in enumerate(values):
             item = QTableWidgetItem(value)
             if column == 0:
-                item.setIcon(QIcon(data["source_path"]))
+                if not self.hide_thumbnails.isChecked():
+                    item.setIcon(QIcon(data["source_path"]))
             item.setToolTip(data.get("error") or data["source_path"])
             if data["status"] == "candidate_match":
                 item.setForeground(QColor("#5de4b4"))
             self.table.setItem(row, column, item)
         self.table.setRowHeight(row, 46)
+        self.update_visibility(new_row=row)
         self.filter_results()
+
+    def update_visibility(self, *_, new_row=None):
+        hide_paths = self.hide_urls.isChecked()
+        hide_images = self.hide_thumbnails.isChecked()
+        self.preview.setVisible(not hide_images)
+        self.preview.caption.setVisible(not hide_paths)
+        # Status and logs can contain paths as well as inference diagnostics.
+        self.statusBar().setVisible(not hide_paths)
+        self.log.setVisible(not hide_paths)
+        rows = range(len(self.results)) if new_row is None else [new_row]
+        for row in rows:
+            data = self.results[row]
+            item = self.table.item(row, 0)
+            item.setText(f"Image {row + 1}" if hide_paths else data["relative_path"])
+            item.setIcon(QIcon() if hide_images else QIcon(data["source_path"]))
+            for column in range(self.table.columnCount()):
+                self.table.item(row, column).setToolTip(
+                    "" if hide_paths else (data.get("error") or data["source_path"])
+                )
+            self.table.setRowHeight(row, 28 if hide_images else 46)
+        if new_row is not None:
+            return
+        for field in (self.source, self.output):
+            field.setEchoMode(
+                QLineEdit.EchoMode.Password if hide_paths else QLineEdit.EchoMode.Normal
+            )
+        for index in range(self.references.count()):
+            item = self.references.item(index)
+            path = item.data(Qt.ItemDataRole.UserRole)
+            item.setIcon(QIcon() if hide_images else QIcon(path))
+            item.setText(f"Reference {index + 1}" if hide_paths else Path(path).name)
+            item.setToolTip("" if hide_paths else path)
 
     def filter_results(self):
         selected = self.filter.currentData()
@@ -473,7 +528,7 @@ STYLE = """
 QMainWindow, QWidget { background: #151d2a; color: #e0e7f1; font-size: 12px; }
 QGroupBox { border: 1px solid #324054; border-radius: 8px; margin-top: 13px; padding: 12px 8px 8px; }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; color: #b5c6df; }
-QLineEdit, QComboBox, QDoubleSpinBox, QListWidget, QPlainTextEdit, QTableWidget {
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QListWidget, QPlainTextEdit, QTableWidget {
  background: #101722; border: 1px solid #34425a; border-radius: 5px; padding: 6px;
  selection-background-color: #304964;
 }

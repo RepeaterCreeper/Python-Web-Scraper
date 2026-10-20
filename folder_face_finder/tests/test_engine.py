@@ -181,7 +181,8 @@ class StubMatcher:
         )
 
 
-def test_pipeline_reports_errors_copies_matches_and_preserves_originals(tmp_path):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_pipeline_reports_errors_copies_matches_and_preserves_originals(tmp_path, workers):
     source = tmp_path / "photos"
     photo(source / "a" / "same.png")
     photo(source / "b" / "same.png")
@@ -193,7 +194,7 @@ def test_pipeline_reports_errors_copies_matches_and_preserves_originals(tmp_path
     }
     events = []
     scan = FolderScan(
-        Config(source, source / "reports", [reference]),
+        Config(source, source / "reports", [reference], workers=workers),
         lambda name, data: events.append((name, data)),
         threading.Event(),
         StubMatcher,
@@ -243,7 +244,8 @@ def test_empty_folder_does_not_load_models(tmp_path):
     assert list(csv.DictReader((scan.run_dir / "results.csv").open())) == []
 
 
-def test_cancel_after_first_result_preserves_partial_report(tmp_path):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_cancel_after_first_result_preserves_partial_report(tmp_path, workers):
     source = tmp_path / "photos"
     photo(source / "1.png")
     photo(source / "2.png")
@@ -253,9 +255,51 @@ def test_cancel_after_first_result_preserves_partial_report(tmp_path):
         if name == "result":
             stop.set()
 
-    scan = FolderScan(Config(source, tmp_path / "output"), emit, stop, StubMatcher)
+    scan = FolderScan(Config(source, tmp_path / "output", workers=workers), emit, stop, StubMatcher)
     scan.run()
     summary = json.loads((scan.run_dir / "summary.json").read_text())
     assert summary["outcome"] == "stopped"
     assert summary["processed"] == summary["remaining"] == 1
     assert len(list(csv.DictReader((scan.run_dir / "results.csv").open()))) == 1
+
+
+@pytest.mark.parametrize("workers", [0, -1, 33, 1.5, True])
+def test_invalid_workers(tmp_path, workers):
+    with pytest.raises(ValueError, match="Parallel workers"):
+        Config(tmp_path, tmp_path, workers=workers).validate()
+
+
+class ParallelMatcher(StubMatcher):
+    def analyze(self, path):
+        import os
+        import time
+
+        # Both workers must enter inference before either is allowed to finish.
+        marker = self.config.output / str(os.getpid())
+        marker.touch()
+        deadline = time.monotonic() + 10
+        while len([p for p in self.config.output.iterdir() if p.is_file()]) < 2:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Inference did not overlap")
+            time.sleep(0.01)
+        return Result("faces_detected", [{}], reference=str(os.getpid()))
+
+
+def test_parallel_inference_uses_separate_processes(tmp_path):
+    source = tmp_path / "photos"
+    for index in range(4):
+        photo(source / f"{index}.png")
+    events = []
+    scan = FolderScan(
+        Config(source, tmp_path / "output", workers=2),
+        lambda name, data: events.append((name, data)),
+        threading.Event(),
+        ParallelMatcher,
+    )
+    scan.run()
+    summary = events[-1][1]
+    assert summary["outcome"] == "complete"
+    assert summary["processed"] == 4
+    results = [data for name, data in events if name == "result"]
+    assert len({row["reference"] for row in results}) == 2
+    assert len({row["source_path"] for row in results}) == 4
